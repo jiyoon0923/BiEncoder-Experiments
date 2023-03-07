@@ -127,3 +127,12 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# custom ignore files
+datasets/*
+outputs/*
+logs/*
+configs/train/*
+!configs/train/base.yaml
+!configs/eval/base.yaml
+!*/README.md

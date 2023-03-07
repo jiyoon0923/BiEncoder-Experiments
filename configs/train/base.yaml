@@ -1,0 +1,43 @@
+seed : 42
+## TODO : overwrite already existing logging file
+data :
+  train_batch_size : 16
+  eval_batch_size : 64
+  dataloader_num_workers : 0
+  dataset : msmarco
+  tokenizer_path : bert-base-uncased
+  passage_max_len : 256
+  query_max_len : 64
+
+train :
+  num_training_steps : 100_000
+  num_train_epochs : 3
+  num_warmup_steps : 10000
+  weight_decay : 0
+  learning_rate : 1e-5
+  adam_epsilon : 1e-8
+  similarity_function : inner_product # cosine | inner_product
+  max_grad_clip_norm : 1 # 0 if not use
+  prebatch_size : 0 # 0 if not use else size of additional negative samples is prebatch_size * train_batch_size
+  use_loss_scale : True
+
+model :
+  model_name : bert-base-uncased
+  do_norm_repr : True
+  projection_dim : 128 # 0 if not use
+  freeze_title_encoder : False
+  freeze_content_encoder : False
+  share_encoder : False
+
+wandb :
+  project_name : Bi-Encoder
+  run_name : base
+
+logging :
+  log_level : info
+  logging_dir : ./logs
+  output_dir : ./outputs
+  ckpt_save_step : 20_000
+  overwrite_output_dir : True
+  logging_steps : 100
+  overwrite : True 

@@ -1,0 +1,9 @@
+logging : 
+  logging_dir : logs
+
+wandb :
+  run_name : base
+
+saved_path : outputs/base/checkpoint-20000[1]
+dataset : msmarco
+test_data_mode : dev
