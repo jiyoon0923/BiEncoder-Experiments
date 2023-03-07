@@ -10,3 +10,5 @@ Bi-Encoder Training Experiments based on Various Training Techniques(e.g. Pre Ba
 
 ## Proposal Papers for Each Techniques
   - PreBatch : [DensePhrases](https://arxiv.org/abs/2012.12624)
+  - Passage-Wise Loss : [PAIR](https://arxiv.org/abs/2108.06027)
+  - Gradient Caching : [Condenser](https://arxiv.org/abs/2104.08253) & [Gradient Cache](https://aclanthology.org/2021.repl4nlp-1.31/)
