@@ -1,10 +1,10 @@
 boto3==1.7.84
 botocore==1.10.84
-transformers==4.8.1
+transformers==4.18.0
 sentence-transformers==2.2.2
-elasticsearch==8.6.2
+elasticsearch==7.9.1
 faiss-gpu==1.7.2
 gpustat==1.0.0
-konlpy==0.6.0
 rank_bm25==0.2.2
 beir==1.0.1
+accelerate-0.16.0

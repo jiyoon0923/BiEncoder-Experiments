@@ -3,7 +3,7 @@ docker run -it \
         -h kimjaehee \
         -p 628:9200 \
         --ipc=host \
-        --name bait-news-gen \
+        --name jaehee_biencoder-container \
         -v ~/codes:/workspace/codes \
-        bait-news-gen:23.03.01 \
+        jaehee/biencoder:23.03.07 \
     bash

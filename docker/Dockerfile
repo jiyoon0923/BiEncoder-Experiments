@@ -27,19 +27,6 @@ ENV LANG en_US.UTF-8
 ENV LANGUAGE en_US:en
 ENV LC_ALL en_US.UTF-8
 
-# install python libraries
-RUN pip install --upgrade pip
-RUN pip install omegaconf wandb 
-WORKDIR /workspace
-COPY requirements.txt /workspace/
-RUN pip install -r /workspace/requirements.txt
-
-ARG UNAME
-ARG UID
-ARG GID
-RUN groupadd -g $GID -o $UNAME
-RUN useradd -m -u $UID -g $GID -o -s /bin/bash $UNAME
-
 # install elastic search
 RUN wget https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-7.17.9-linux-x86_64.tar.gz \
     && wget https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-7.17.9-linux-x86_64.tar.gz.sha512 \
@@ -49,4 +36,18 @@ RUN wget https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-7.17
     && rm *.gz.sha512 \
     && chown -R $UNAME:$UNAME /workspace/elasticsearch-7.17.9
 
+ARG UNAME
+ARG UID
+ARG GID
+RUN groupadd -g $GID -o $UNAME
+RUN useradd -m -u $UID -g $GID -o -s /bin/bash $UNAME
 USER $UNAME
+
+# install python libraries
+RUN pip install --user --upgrade pip
+RUN pip install --user omegaconf wandb 
+WORKDIR /workspace
+COPY requirements.txt /workspace/
+RUN pip install --user -r /workspace/requirements.txt
+
+RUN echo 'export PATH="/home/jaegeekim/.local/bin:$PATH"' >> ~/.bashrc
