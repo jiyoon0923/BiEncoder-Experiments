@@ -8,6 +8,7 @@ import numpy as np
 import os
 import random 
 import shutil
+import omegaconf
 from tqdm import tqdm
 from accelerate import Accelerator
 from transformers import get_cosine_schedule_with_warmup
@@ -34,16 +35,18 @@ class DPRTrainer() :
 
         self.set_seed(self.config.seed)
 
+        ## train setup
         self.biencoder = self.get_biencoder()
         self.optimizer, self.lr_scheduler = self.create_optimizer_and_scheduler(self.config.train['num_training_steps'])
         self.train_dataloader = self.get_train_dataloader()
+        self.eval_dataloader = self.get_eval_dataloader()
         self.loss_scale = self.config.train['prebatch_size'] + 1 if self.config.train['use_loss_scale'] else 1
         self.max_iteration = self.config.train['num_training_steps'] if self.config.train['num_training_steps'] else len(self.train_dataloader)//self.config.data['train_batch_size'] * self.config.train['num_train_epochs']
 
         ## log configs for wandb
         config_for_wandb = {}
         for key, value in self.config.items() :
-            if isinstance(value, dict) :
+            if isinstance(value, omegaconf.dictconfig.DictConfig) :
                 config_for_wandb.update(value)
             else :
                 config_for_wandb.update({key : value})
@@ -76,16 +79,13 @@ class DPRTrainer() :
         ]
         return optimizer_grouped_parameters
 
-    def compute_loss(self, model, bi_encoder_model : BiEncoder, inputs : dict, return_outputs = False) :
-        query, rel_doc = inputs['query'], inputs['rel_doc']
-        query_repr, corpus_repr = bi_encoder_model(query, rel_doc)
-        loss_output = self.loss_fn(query_repr, corpus_repr) # loss, in batch accuracy
-        loss, in_batch_accuracy = loss_output['loss'], loss_output['acc']
-        return (loss, in_batch_accuracy) if return_outputs else loss
-
     def get_train_dataloader(self) -> DataLoader:
         dataset = DPRDataset(self.config.data, split = 'train')
         return DataLoader(dataset, batch_size = self.config.data['train_batch_size'], shuffle = True, num_workers = self.config.data['dataloader_num_workers'], collate_fn = collate_fn)
+
+    def get_eval_dataloader(self) -> DataLoader:
+        dataset = DPRDataset(self.config.data, split = 'dev')
+        return DataLoader(dataset, batch_size = self.config.data['eval_batch_size'], shuffle = False, num_workers = self.config.data['dataloader_num_workers'], collate_fn = collate_fn)
 
     def get_biencoder(self) -> BiEncoder :
         self.query_encoder = BERTEncoder.init_encoder(
@@ -108,42 +108,26 @@ class DPRTrainer() :
             )
         
         return biencoder
-    
-    def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]]) -> torch.Tensor:
-        model.train()   
-        outputs = model( # model returns query/ctx representation. see model.py@line87
-            query_inputs = inputs['query'],
-            ctx_inputs   = inputs['ctx']
-        )
-
-        loss_and_acc = self.loss_fn(
-            query_repr      = outputs['query_repr'],
-            ctx_repr        = outputs['ctx_repr']
-        )
-        loss_and_acc['loss'] = loss_and_acc['loss'] / self.loss_scale # if prebatch used, the loss must be scaled, otherwise the loss will be bigger than expected; which will cause the model to diverge
-        self.log_metrics(loss_and_acc, self.global_step, self.global_epoch)
-        return loss_and_acc
 
     def train(self):
         self.global_step = 0
         self.global_epoch = 0
+        self.biencoder.train()   
 
         with tqdm(total = self.max_iteration, desc = '>>> Training', dynamic_ncols = True) as pbar :
             while True :
                 self.global_epoch += 1
                 for batch in self.train_dataloader :
-                    self.global_step += 1
-                    self.optimizer.zero_grad()
-                    iteration_output = self.training_step(self.biencoder, batch)
-                    loss = iteration_output['loss']
-                    self.accelerator.backward(loss)
-                    if self.config.train['max_grad_clip_norm'] != 0 :
-                        self.accelerator.clip_grad_norm_(self.biencoder.parameters(), self.config.train['max_grad_clip_norm'])
-                    self.optimizer.step()
-                    self.lr_scheduler.step()
+
+                    self.training_step(batch)
+                    
                     pbar.update(1)
+
                     if self.global_step % self.config.logging['ckpt_save_step'] == 0 :
                         self._save_checkpoint()
+
+                    if self.global_step % self.config.train['eval_step'] == 0 :
+                        self._eval()
 
                     if self.global_step >= self.max_iteration :
                         self.logger.info(f">>> Training finished at step {self.global_step}")
@@ -151,12 +135,63 @@ class DPRTrainer() :
                 if self.global_step >= self.max_iteration :
                     break
 
+    def training_step(self, inputs: Dict[str, Union[torch.Tensor, Any]]) -> torch.Tensor:
+        self.global_step += 1
+
+        loss_and_acc = self.compute_loss(inputs = inputs, global_step = self.global_step)
+        self.accelerator.backward(loss_and_acc['loss'])
+        if self.config.train['max_grad_clip_norm'] != 0 :
+            self.accelerator.clip_grad_norm_(self.biencoder.parameters(), self.config.train['max_grad_clip_norm'])
+        self.optimizer.step()
+        self.lr_scheduler.step()
+        self.optimizer.zero_grad()
+
+        self.log_metrics(loss_and_acc, self.global_step, self.global_epoch)
+
+    def _eval(self) :
+        self.eval_loss = []
+        self.eval_inbatch_acc = []
+
+        self.biencoder.eval()
+        with torch.no_grad() :
+            for batch in self.eval_dataloader :
+                loss_and_acc = self.compute_loss(inputs = batch)
+                self.eval_loss.append(loss_and_acc['loss'].item())
+                self.eval_inbatch_acc.append(loss_and_acc['acc'].item())
+
+        self.biencoder.train()
+
+        metrics = {
+            'eval_loss' : np.mean(self.eval_loss),
+            'eval_acc' : np.mean(self.eval_inbatch_acc)
+        }
+
+        self.log_metrics(metrics, self.global_step, self.global_epoch)
+    
+    def compute_loss(self, inputs : Dict[str, Union[torch.Tensor, Any]], global_step : int = 0) -> Dict[str, torch.Tensor] :
+        outputs = self.biencoder( # model returns query/ctx representation. see model.py@line87
+            query_inputs = inputs['query'],
+            ctx_inputs   = inputs['ctx']
+        )
+
+        loss_and_acc = self.loss_fn(
+            query_repr      = outputs['query_repr'],
+            ctx_repr        = outputs['ctx_repr'],
+            global_step     = global_step,
+        )
+
+        loss_and_acc['loss'] = loss_and_acc['loss'] / self.loss_scale # if prebatch used, the loss must be scaled, otherwise the loss will be bigger than expected; which will cause the model to diverge
+        return loss_and_acc
+        
     def log_metrics(self, metrics, step, epoch) :
         lr = self.lr_scheduler.get_last_lr()[0]
         metrics['lr'] = lr
         wandb.log(metrics, step = step)
         if step % self.config.logging['logging_steps'] == 0 :
-            self.logger.info(f">>> step : {step}, epoch : {epoch}, loss : {metrics['loss']:.4f}, in-batch acc : {metrics['acc']:.4f}, lr : {lr:.6f}")
+            metrics['step'] = step
+            metrics['epoch'] = epoch
+            metrics_to_str = ', '.join([f"{k} : {v:.4f}" for k, v in metrics.items()])
+            self.logger.info(f">>> {metrics_to_str}")
     
     def set_seed(seld, seed : int) :
         torch.manual_seed(seed)
@@ -181,7 +216,7 @@ def main() :
     import logging
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type = str, default = 'configs/default.yaml')
+    parser.add_argument('--config', type = str, default = 'configs/train/base.yaml')
     args = parser.parse_args()
 
     config = omegaconf.OmegaConf.load(args.config)

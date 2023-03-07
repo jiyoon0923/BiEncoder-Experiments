@@ -142,13 +142,14 @@ class BiEncoderNllLoss(nn.Module) :
         if cfg['prebatch_size'] > 0 :
             ## codes from DensePhrases Official Code(https://github.com/princeton-nlp/DensePhrases/blob/main/densephrases/encoder.py)
             self.prebatch = deque(maxlen = cfg['prebatch_size'])
+            self.prebatch_warmup = cfg['prebatch_warmup']
         else :
             self.prebatch = None
         self.loss_fn = NLLLoss()
     
-    def forward(self, query_repr : torch.tensor, ctx_repr : torch.tensor, pos_idx = None) :
+    def forward(self, query_repr : torch.tensor, ctx_repr : torch.tensor, pos_idx = None, global_step = 0) :
         ## concat with prebatch
-        if (self.prebatch is not None) and len(self.prebatch) > 0 :
+        if (self.prebatch is not None) and len(self.prebatch) > 0 and (global_step > self.prebatch_warmup): # if prebatch is setup and the training step is larger than the warmup step
             ctx_repr_with_prebatch = torch.cat([ctx_repr, torch.cat(list(self.prebatch))], dim = 0)
         else :
             ctx_repr_with_prebatch = ctx_repr

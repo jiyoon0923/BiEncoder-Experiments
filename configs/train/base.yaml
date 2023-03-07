@@ -10,7 +10,7 @@ data :
   query_max_len : 64
 
 train :
-  num_training_steps : 100_000
+  num_training_steps : 20_000
   num_train_epochs : 3
   num_warmup_steps : 10000
   weight_decay : 0
@@ -19,7 +19,7 @@ train :
   similarity_function : inner_product # cosine | inner_product
   max_grad_clip_norm : 1 # 0 if not use
   prebatch_size : 0 # 0 if not use else size of additional negative samples is prebatch_size * train_batch_size
-  use_loss_scale : True
+  use_loss_scale : False
 
 model :
   model_name : bert-base-uncased

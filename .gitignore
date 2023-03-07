@@ -136,3 +136,4 @@ configs/train/*
 !configs/train/base.yaml
 !configs/eval/base.yaml
 !*/README.md
+wandb/
