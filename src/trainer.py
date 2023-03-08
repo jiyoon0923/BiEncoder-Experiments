@@ -30,10 +30,10 @@ class DPRTrainer() :
         1. create_optimizer_and_scheduler : grouped parameter optimization, learning rate scheduler
 
         '''
-        self.loss_fn = BiEncoderNllLoss(config['train'])
         self.config = config
 
         self.set_seed(self.config.seed)
+        self.loss_fn = BiEncoderNllLoss(self.config['train'])
 
         ## train setup
         self.biencoder = self.get_biencoder()
@@ -156,10 +156,10 @@ class DPRTrainer() :
 
         self.biencoder.eval()
         with torch.no_grad() :
-            for batch in self.eval_dataloader :
+            for batch in tqdm(self.eval_dataloader, desc = '>>> Evaluating:', dynamic_ncols = True) :
                 loss_and_acc = self.compute_loss(inputs = batch)
-                self.eval_loss.append(loss_and_acc['loss'].item())
-                self.eval_inbatch_acc.append(loss_and_acc['acc'].item())
+                self.eval_loss.append(loss_and_acc['loss'].cpu())
+                self.eval_inbatch_acc.append(loss_and_acc['acc'])
 
         self.biencoder.train()
 
@@ -195,7 +195,7 @@ class DPRTrainer() :
             metrics_to_str = ', '.join([f"{k} : {v:.4f}" for k, v in metrics.items()])
             self.logger.info(f">>> {metrics_to_str}")
     
-    def set_seed(seld, seed : int) :
+    def set_seed(self, seed : int) :
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed) # if use multi-GPU 
@@ -218,7 +218,7 @@ def main() :
     import logging
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type = str, default = 'configs/train/base.yaml')
+    parser.add_argument('--config', type = str, default = 'configs/train/default.yaml')
     args = parser.parse_args()
 
     config = omegaconf.OmegaConf.load(args.config)
