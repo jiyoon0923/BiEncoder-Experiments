@@ -10,15 +10,17 @@ data :
   query_max_len : 64
 
 train :
-  num_training_steps : 20_000
+  num_training_steps : 25_000
   num_train_epochs : 3
-  num_warmup_steps : 10000
+  num_warmup_steps : 5000
+  eval_step : 5000
   weight_decay : 0
   learning_rate : 1e-5
   adam_epsilon : 1e-8
   similarity_function : inner_product # cosine | inner_product
   max_grad_clip_norm : 1 # 0 if not use
   prebatch_size : 0 # 0 if not use else size of additional negative samples is prebatch_size * train_batch_size
+  prebatch_warmup : 5000
   use_loss_scale : False
 
 model :
@@ -37,7 +39,7 @@ logging :
   log_level : info
   logging_dir : ./logs
   output_dir : ./outputs
-  ckpt_save_step : 20_000
+  ckpt_save_step : 5000
   overwrite_output_dir : True
   logging_steps : 100
   overwrite : True 

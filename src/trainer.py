@@ -55,7 +55,9 @@ class DPRTrainer() :
         self.logger = logger
 
         self.accelerator = Accelerator()
-        self.biencoder, self.optimizer, self.lr_scheduler, self.train_dataloader = self.accelerator.prepare(self.biencoder, self.optimizer, self.lr_scheduler, self.train_dataloader)
+        self.biencoder, self.optimizer, self.lr_scheduler, self.train_dataloader, self.eval_dataloader = self.accelerator.prepare(
+            self.biencoder, self.optimizer, self.lr_scheduler, self.train_dataloader, self.eval_dataloader
+            )
         self.device = self.accelerator.device
         self.accelerator.register_for_checkpointing(self.lr_scheduler)
 
@@ -188,8 +190,8 @@ class DPRTrainer() :
         metrics['lr'] = lr
         wandb.log(metrics, step = step)
         if step % self.config.logging['logging_steps'] == 0 :
-            metrics['step'] = step
-            metrics['epoch'] = epoch
+            metrics['step'] = int(step)
+            metrics['epoch'] = int(epoch)
             metrics_to_str = ', '.join([f"{k} : {v:.4f}" for k, v in metrics.items()])
             self.logger.info(f">>> {metrics_to_str}")
     
