@@ -33,7 +33,9 @@ class DPRTrainer() :
         self.config = config
 
         self.set_seed(self.config.seed)
-        self.loss_fn = BiEncoderNllLoss(self.config['train'])
+        ## loss setup, because the prebatch influence the loss function, we need to separate the loss function for train and eval mode
+        self.loss_fn_train = BiEncoderNllLoss(self.config['train'], train_mode = True)
+        self.loss_fn_eval = BiEncoderNllLoss(self.config['train'], train_mode = False)
 
         ## train setup
         self.biencoder = self.get_biencoder()
@@ -106,7 +108,8 @@ class DPRTrainer() :
             query_encoder           = self.query_encoder,
             ctx_encoder             = self.ctx_encoder,
             freeze_query_encoder    = self.config.model['freeze_title_encoder'],
-            freeze_ctx_encoder      = self.config.model['freeze_content_encoder']
+            freeze_ctx_encoder      = self.config.model['freeze_content_encoder'],
+            momentum                = self.config.model['momentum'],
             )
         
         return biencoder
@@ -147,6 +150,9 @@ class DPRTrainer() :
         self.optimizer.step()
         self.lr_scheduler.step()
         self.optimizer.zero_grad()
+        
+        if self.biencoder.momentum > 0 :
+            self._momentum_update_ctx_encoder() # update context encoder with momentum
 
         self.log_metrics(loss_and_acc, self.global_step, self.global_epoch)
 
@@ -175,12 +181,18 @@ class DPRTrainer() :
             query_inputs = inputs['query'],
             ctx_inputs   = inputs['ctx']
         )
+        if self.biencoder.training :
+            loss_and_acc = self.loss_fn_train(
+                query_repr      = outputs['query_repr'],
+                ctx_repr        = outputs['ctx_repr'],
+                global_step     = global_step,
+            )
 
-        loss_and_acc = self.loss_fn(
-            query_repr      = outputs['query_repr'],
-            ctx_repr        = outputs['ctx_repr'],
-            global_step     = global_step,
-        )
+        else :
+            loss_and_acc = self.loss_fn_eval(
+                query_repr      = outputs['query_repr'],
+                ctx_repr        = outputs['ctx_repr'],
+            )
 
         loss_and_acc['loss'] = loss_and_acc['loss'] / self.loss_scale # if prebatch used, the loss must be scaled, otherwise the loss will be bigger than expected; which will cause the model to diverge
         return loss_and_acc

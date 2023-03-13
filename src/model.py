@@ -21,7 +21,8 @@ class BiEncoder(nn.Module) :
                  query_encoder : nn.Module, 
                  ctx_encoder : nn.Module, 
                  freeze_query_encoder : bool = False,
-                 freeze_ctx_encoder : bool = False
+                 freeze_ctx_encoder : bool = False,
+                 momentum : float = 0
                  ) -> None:
         super().__init__()
         self.loss_fn = NLLLoss()
@@ -30,6 +31,11 @@ class BiEncoder(nn.Module) :
         self.ctx_encoder = ctx_encoder
         self.freeze_query_encoder = freeze_query_encoder
         self.freeze_ctx_encoder = freeze_ctx_encoder
+        self.momentum = momentum
+        if self.momentum > 0:
+            logger.info(f">>> Context Encoder is Freezed : momentum = {self.momentum}")
+            for param in self.ctx_encoder.parameters():
+                param.requires_grad = False
     
     @staticmethod
     def get_representation(
@@ -87,6 +93,15 @@ class BiEncoder(nn.Module) :
 
     def get_state_dict(self):
         return self.state_dict()
+    
+    @torch.no_grad()
+    def _momentum_update_ctx_encoder(self) :
+        """
+        Codes from MoCo Official Code(https://github.com/facebookresearch/moco/blob/main/moco/builder.py)
+        """
+        for param_q, param_k in zip(self.query_encoder.parameters(), self.ctx_encoder.parameters()) :
+            param_k.data = param_k.data * self.momentum + param_q.data * (1. - self.momentum)
+
 
 class BERTEncoder(BertModel) :
     """
@@ -130,19 +145,22 @@ class BERTEncoder(BertModel) :
         
         return {'sequence_output' : sequence_output, 'pooled_output' : pooled_output}
 
+
 ## TODO : add passage-wise loss
 class BiEncoderNllLoss(nn.Module) :
-    def __init__(self, cfg) -> None:
+    def __init__(self, cfg, train_mode = True) -> None:
         super().__init__()
         if cfg['similarity_function'] == 'cosine' :
             self.similarity_fn = self.cosine_similarity
         elif cfg['similarity_function'] == 'inner_product':
             self.similarity_fn = self.inner_product
         
-        if cfg['prebatch_size'] > 0 :
+        if cfg['prebatch_size'] > 0 and train_mode :
             ## codes from DensePhrases Official Code(https://github.com/princeton-nlp/DensePhrases/blob/main/densephrases/encoder.py)
             self.prebatch = deque(maxlen = cfg['prebatch_size'])
             self.prebatch_warmup = cfg['prebatch_warmup']
+            self.prebatch_size = cfg['prebatch_size']
+            self.update_prebatch = cfg['update_prebatch']
         else :
             self.prebatch = None
         self.loss_fn = NLLLoss()
@@ -165,7 +183,10 @@ class BiEncoderNllLoss(nn.Module) :
 
         ## add prebatch
         if self.prebatch is not None :
-            self.prebatch.append(ctx_repr.clone().detach())
+            if self.update_prebatch :
+                self.prebatch = deque([ctx_repr_with_prebatch[:self.prebatch_size].clone().detach()], maxlen = self.prebatch_size)
+            else:
+                self.prebatch.append(ctx_repr.clone().detach())
         loss = self.loss_fn(softmax_scores, pos_idx)
         return {'loss' : loss, 'acc' : in_batch_acc}
 
