@@ -2,11 +2,12 @@
 Bi-Encoder Training Experiments based on Various Training Techniques(e.g. Pre Batch, Passage-wise Loss, Gradient Caching, ...)
 
 ## Todo List
-  - [ ] Validation Dataset In-Batch Negative Accuracy Logging
+  - [X] Validation Dataset In-Batch Negative Accuracy Logging
   - [ ] Gradient Caching Implementation
   - [ ] Passage-Wise Loss Implementation
-  - [ ] PreBatch After Model Warmup Implementation
-
+  - [X] PreBatch After Model Warmup Implementation
+  - [ ] Multi GPU Setting
+  - [ ] Loading Scheduler & Model
 
 ## Proposal Papers for Each Techniques
   - PreBatch : [DensePhrases](https://arxiv.org/abs/2012.12624)
