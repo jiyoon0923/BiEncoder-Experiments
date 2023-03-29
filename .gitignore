@@ -131,6 +131,7 @@ dmypy.json
 # custom ignore files
 datasets/*
 outputs/*
+configs/eval/*
 logs/*
 configs/train/*
 !configs/train/base.yaml

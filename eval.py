@@ -85,7 +85,7 @@ def main() :
 
     logging_dir = os.path.join(config.logging['logging_dir'], config.wandb['run_name'])
     logging.basicConfig(
-        filename    = os.path.join(logging_dir, config.wandb['run_name'] + '_index' + '.log'),
+        filename    = os.path.join(logging_dir, config['saved_path'].split("/")[-1] + '_index' + '.log'),
         format      = '%(asctime)s - %(levelname)s - %(name)s - %(message)s',
         datefmt     = '%m/%d/%Y %H:%M:%S',
         level       = logging.INFO
@@ -96,7 +96,7 @@ def main() :
         CustomBiEncoder(model_path=model_path)
         )
 
-    index_name = f"dpr_{config['dataset']}_{config.wandb['run_name']}_{config['test_data_mode']}"
+    index_name = f"dpr_{config['dataset']}_{config.wandb['run_name']}_{config['saved_path'].split('/')[-1]}_{config['test_data_mode']}"
     index_dir = os.path.join(config['saved_path'], index_name)
     if not os.path.exists(index_dir) :
         os.makedirs(index_dir)

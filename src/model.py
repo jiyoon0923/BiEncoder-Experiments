@@ -18,12 +18,12 @@ class BiEncoder(nn.Module) :
     modified for additional experience by jaehee_kim@korea.ac.kr
     """
     def __init__(self, 
-                 query_encoder : nn.Module, 
-                 ctx_encoder : nn.Module, 
-                 freeze_query_encoder : bool = False,
-                 freeze_ctx_encoder : bool = False,
-                 momentum : float = 0
-                 ) -> None:
+                query_encoder : nn.Module, 
+                ctx_encoder : nn.Module, 
+                freeze_query_encoder : bool = False,
+                freeze_ctx_encoder : bool = False,
+                momentum : float = 0
+                ) -> None:
         super().__init__()
         self.loss_fn = NLLLoss()
 

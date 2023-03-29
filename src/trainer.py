@@ -3,14 +3,15 @@ from typing import Dict, Union, Any, List, Optional
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
-import wandb
 import numpy as np
 import os
 import random 
 import shutil
 import omegaconf
 from tqdm import tqdm
-from accelerate import Accelerator
+
+from accelerate import Accelerator, DistributedDataParallelKwargs
+from accelerate.tracking import on_main_process
 from transformers import get_cosine_schedule_with_warmup
 
 from model import BiEncoder, BERTEncoder, BiEncoderNllLoss
@@ -30,9 +31,28 @@ class DPRTrainer() :
         1. create_optimizer_and_scheduler : grouped parameter optimization, learning rate scheduler
 
         '''
-        self.config = config
+        ## accelerator setup
+        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+        self.accelerator = Accelerator(kwargs_handlers=[ddp_kwargs], log_with='wandb') # logging with wandb
 
+        ## config setup
+        self.config = config
         self.set_seed(self.config.seed)
+
+        ## logger setup
+        config_for_wandb = {}
+        for key, value in self.config.items() :
+            if isinstance(value, omegaconf.dictconfig.DictConfig) :
+                config_for_wandb.update(value)
+            else :
+                config_for_wandb.update({key : value})
+        self.accelerator.init_trackers(
+            project_name = self.config.wandb['project_name'],
+            config = config_for_wandb,
+            init_kwargs = {'wandb' : {'name' : self.config.wandb['run_name']}} # wandb init kwargs
+        )
+        self.logger = logger
+
         ## loss setup, because the prebatch influence the loss function, we need to separate the loss function for train and eval mode
         self.loss_fn_train = BiEncoderNllLoss(self.config['train'], train_mode = True)
         self.loss_fn_eval = BiEncoderNllLoss(self.config['train'], train_mode = False)
@@ -40,23 +60,12 @@ class DPRTrainer() :
         ## train setup
         self.biencoder = self.get_biencoder()
         self.optimizer, self.lr_scheduler = self.create_optimizer_and_scheduler(self.config.train['num_training_steps'])
+        
         self.train_dataloader = self.get_train_dataloader()
         self.eval_dataloader = self.get_eval_dataloader()
         self.loss_scale = self.config.train['prebatch_size'] + 1 if self.config.train['use_loss_scale'] else 1
         self.max_iteration = self.config.train['num_training_steps'] if self.config.train['num_training_steps'] else len(self.train_dataloader)//self.config.data['train_batch_size'] * self.config.train['num_train_epochs']
 
-        ## log configs for wandb
-        config_for_wandb = {}
-        for key, value in self.config.items() :
-            if isinstance(value, omegaconf.dictconfig.DictConfig) :
-                config_for_wandb.update(value)
-            else :
-                config_for_wandb.update({key : value})
-
-        wandb.init(project = self.config.wandb['project_name'], config = config_for_wandb, name = self.config.wandb['run_name'])
-        self.logger = logger
-
-        self.accelerator = Accelerator()
         self.biencoder, self.optimizer, self.lr_scheduler, self.train_dataloader, self.eval_dataloader = self.accelerator.prepare(
             self.biencoder, self.optimizer, self.lr_scheduler, self.train_dataloader, self.eval_dataloader
             )
@@ -129,7 +138,8 @@ class DPRTrainer() :
                     pbar.update(1)
 
                     if self.global_step % self.config.logging['ckpt_save_step'] == 0 :
-                        self._save_checkpoint()
+                        if self.accelerator.is_main_process :
+                            self._save_checkpoint()
 
                     if self.global_step % self.config.train['eval_step'] == 0 :
                         self._eval()
@@ -151,27 +161,32 @@ class DPRTrainer() :
         self.lr_scheduler.step()
         self.optimizer.zero_grad()
         
-        if self.biencoder.momentum > 0 :
-            self._momentum_update_ctx_encoder() # update context encoder with momentum
+        if self.config.model['momentum'] > 0 :
+            self.biencoder._momentum_update_ctx_encoder() # update context encoder with momentum
 
         self.log_metrics(loss_and_acc, self.global_step, self.global_epoch)
 
     def _eval(self) :
-        self.eval_loss = []
-        self.eval_inbatch_acc = []
+        eval_len = len(self.eval_dataloader)
+        self.eval_loss = torch.tensor(0.0, device = self.device)
+        self.eval_inbatch_acc = torch.tensor(0.0, device = self.device)
 
         self.biencoder.eval()
         with torch.no_grad() :
             for batch in tqdm(self.eval_dataloader, desc = '>>> Evaluating:', dynamic_ncols = True) :
                 loss_and_acc = self.compute_loss(inputs = batch)
-                self.eval_loss.append(loss_and_acc['loss'].cpu())
-                self.eval_inbatch_acc.append(loss_and_acc['acc'])
-
+                self.eval_loss += loss_and_acc['loss']
+                self.eval_inbatch_acc += loss_and_acc['acc']
+                
         self.biencoder.train()
+        ## gather metrics from all processes
+        self.eval_loss, self.eval_inbatch_acc = self.accelerator.gather_for_metrics((self.eval_loss, self.eval_inbatch_acc))
+        self.eval_loss = torch.sum(self.eval_loss)/(eval_len*self.eval_loss.shape[0]) # self.eval_loss.shape[0] is the number of processes
+        self.eval_inbatch_acc = torch.sum(self.eval_inbatch_acc)/(eval_len*self.eval_inbatch_acc.shape[0]) # self.eval_loss.shape[0] is the number of processes
 
         metrics = {
-            'eval_loss' : np.mean(self.eval_loss),
-            'eval_acc' : np.mean(self.eval_inbatch_acc)
+            'eval_loss' : self.eval_loss,
+            'eval_acc' : self.eval_inbatch_acc,
         }
 
         self.log_metrics(metrics, self.global_step, self.global_epoch)
@@ -196,16 +211,16 @@ class DPRTrainer() :
 
         loss_and_acc['loss'] = loss_and_acc['loss'] / self.loss_scale # if prebatch used, the loss must be scaled, otherwise the loss will be bigger than expected; which will cause the model to diverge
         return loss_and_acc
-        
-    def log_metrics(self, metrics, step, epoch) :
+    
+    def log_metrics(self, metrics, step, epoch) : # only log main process when using multi-GPU
         lr = self.lr_scheduler.get_last_lr()[0]
         metrics['lr'] = lr
-        wandb.log(metrics, step = step)
+        self.accelerator.log(metrics, step = step) # log metrics to wandb
         if step % self.config.logging['logging_steps'] == 0 :
             metrics['step'] = int(step)
             metrics['epoch'] = int(epoch)
             metrics_to_str = ', '.join([f"{k} : {v:.4f}" for k, v in metrics.items()])
-            self.logger.info(f">>> {metrics_to_str}")
+            self.logger.info(f">>> {metrics_to_str}") # log metrics to console
     
     def set_seed(self, seed : int) :
         torch.manual_seed(seed)
@@ -228,6 +243,7 @@ def main() :
     import omegaconf
     import argparse
     import logging
+    from accelerate.logging import get_logger
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type = str, default = 'configs/train/default.yaml')
@@ -250,7 +266,8 @@ def main() :
         datefmt     = '%m/%d/%Y %H:%M:%S',
         level       = logging.INFO
     )
-    logger = logging.getLogger(__name__)
+
+    logger = get_logger(__name__) # get logger via Huggingface Accelerator
 
     trainer = DPRTrainer(config, logger)
     trainer.train()
