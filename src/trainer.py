@@ -36,6 +36,7 @@ class DPRTrainer() :
         ## config setup
         self.config = config
         self.config.data['train_batch_size'] = self.config.data['train_batch_size']*self.config['num_devices']
+        self.config.data['eval_batch_size'] = self.config.data['eval_batch_size']*self.config['num_devices']
         self.set_seed(self.config.seed)
 
         ## accelerator setup
@@ -44,7 +45,7 @@ class DPRTrainer() :
             gradient_accumulation_steps=self.config.train['gradient_accumulation_steps'],
             kwargs_handlers=[ddp_kwargs], 
             log_with='wandb', # logging with wandb
-            split_batches=True, # split batches for gradient accumulation
+            split_batches=True, 
             ) 
 
         ## logger setup
@@ -133,47 +134,61 @@ class DPRTrainer() :
 
     def train(self):
         self.global_step = 1
-        self.global_epoch = 0
+        self.global_epoch = -1 
         self.biencoder.train()   
 
         with tqdm(total = self.max_iteration, desc = '>>> Training', dynamic_ncols = True) as pbar :
             while True :
+                self.global_epoch += 1
                 for batch in self.train_dataloader :
-                    self.training_step(batch)
+                    with self.accelerator.accumulate(self.biencoder):
+                        # self.training_step(batch)
+                        loss_and_acc = self.compute_loss(inputs = batch, global_step = self.global_step)
+                        self.accelerator.backward(loss_and_acc['loss'])
+                        if self.config.train['max_grad_clip_norm'] != 0 and self.accelerator.sync_gradients :
+                            self.accelerator.clip_grad_norm_(self.biencoder.parameters(), self.config.train['max_grad_clip_norm'])
+                        self.optimizer.step()
+                        self.optimizer.zero_grad()
+                        self.lr_scheduler.step()
 
-                    if self.accelerator.sync_gradients :
-                        pbar.update(1)
-                        self.global_step += 1
+                        if self.config.model['momentum'] > 0 :
+                            self.biencoder._momentum_update_ctx_encoder() # update context encoder with momentum
 
-                    if self.global_step % self.config.logging['ckpt_save_step'] == 0 :
-                        if self.accelerator.is_main_process :
-                            self._save_checkpoint()
+                        if self.accelerator.sync_gradients :
+                            self.log_metrics(loss_and_acc, self.global_step, self.global_epoch)
 
-                    if self.global_step % self.config.train['eval_step'] == 0 :
-                        self._eval()
+                        if self.accelerator.sync_gradients :
+                            pbar.update(1)
+                            self.global_step += 1
 
-                    if self.global_step >= self.max_iteration :
-                        self.logger.info(f">>> Training finished at step {self.global_step}")
-                        self.accelerator.end_training()
-                        break
+                        if self.global_step % self.config.logging['ckpt_save_step'] == 0 :
+                            if self.accelerator.is_main_process :
+                                self._save_checkpoint()
+
+                        if self.global_step % self.config.train['eval_step'] == 0 :
+                            self._eval()
+
+                        if self.global_step >= self.max_iteration :
+                            self.logger.info(f">>> Training finished at step {self.global_step}")
+                            self.accelerator.end_training()
+                            break
                 if self.global_step >= self.max_iteration :
                     break
 
-    def training_step(self, inputs: Dict[str, Union[torch.Tensor, Any]]) -> torch.Tensor:
-        with self.accelerator.accumulate(self.biencoder):
-            loss_and_acc = self.compute_loss(inputs = inputs, global_step = self.global_step)
-            self.accelerator.backward(loss_and_acc['loss'])
-            if self.config.train['max_grad_clip_norm'] != 0 and self.accelerator.sync_gradients :
-                self.accelerator.clip_grad_norm_(self.biencoder.parameters(), self.config.train['max_grad_clip_norm'])
-            self.optimizer.step()
-            self.optimizer.zero_grad()
-            self.lr_scheduler.step()
+    # def training_step(self, inputs: Dict[str, Union[torch.Tensor, Any]]) -> torch.Tensor:
+    #     loss_and_acc = self.compute_loss(inputs = inputs, global_step = self.global_step)
+    #     self.accelerator.backward(loss_and_acc['loss'])
+    #     if self.config.train['max_grad_clip_norm'] != 0 and self.accelerator.sync_gradients :
+    #         self.accelerator.clip_grad_norm_(self.biencoder.parameters(), self.config.train['max_grad_clip_norm'])
+    #     self.optimizer.step()
+    #     self.optimizer.zero_grad()
+    #     self.lr_scheduler.step()
 
-            if self.config.model['momentum'] > 0 :
-                self.biencoder._momentum_update_ctx_encoder() # update context encoder with momentum
+    #     if self.config.model['momentum'] > 0 :
+    #         self.biencoder._momentum_update_ctx_encoder() # update context encoder with momentum
 
-        if self.accelerator.sync_gradients :
-            self.log_metrics(loss_and_acc, self.global_step, self.global_epoch)
+    #     if self.accelerator.sync_gradients :
+    #         self.log_metrics(loss_and_acc, self.global_step, self.global_epoch)
 
     def _eval(self) :
         eval_len = len(self.eval_dataloader)
