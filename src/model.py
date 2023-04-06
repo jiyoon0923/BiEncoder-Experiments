@@ -8,6 +8,8 @@ import torch
 from torch.nn import NLLLoss
 from transformers import BertConfig, BertModel
 
+from accelerate import Accelerator
+
 
 logger = logging.getLogger(__name__)
 
@@ -148,31 +150,45 @@ class BERTEncoder(BertModel) :
 
 ## TODO : add passage-wise loss
 class BiEncoderNllLoss(nn.Module) :
-    def __init__(self, cfg, train_mode = True) -> None:
+    def __init__(self, cfg, train_mode = True, accumulation_step = 1) -> None:
         super().__init__()
-        if cfg['similarity_function'] == 'cosine' :
-            self.similarity_fn = self.cosine_similarity
-        elif cfg['similarity_function'] == 'inner_product':
-            self.similarity_fn = self.inner_product
-        
+        self.similarity_fn = self.inner_product
+
+        ## init prebatch
         if cfg['prebatch_size'] > 0 and train_mode :
             ## codes from DensePhrases Official Code(https://github.com/princeton-nlp/DensePhrases/blob/main/densephrases/encoder.py)
             self.prebatch = deque(maxlen = cfg['prebatch_size'])
             self.prebatch_warmup = cfg['prebatch_warmup']
             self.prebatch_size = cfg['prebatch_size']
             self.update_prebatch = cfg['update_prebatch']
-        else :
-            self.prebatch = None
+        
+        ## init query and passage queue for contrastive accumulation
+        if cfg['cont_accum_passage'] and train_mode :
+            self.passage_queue = deque(maxlen = accumulation_step)
+        
+        if cfg['cont_accum_query'] and train_mode :
+            self.query_queue = deque(maxlen = accumulation_step)
+
         self.loss_fn = NLLLoss()
     
-    def forward(self, query_repr : torch.tensor, ctx_repr : torch.tensor, pos_idx = None, global_step = 0) :
+    def forward(self, query_repr : torch.tensor, ctx_repr : torch.tensor, pos_idx = None, global_step = 0, _done_accum = False) -> dict:
         ## concat with prebatch
-        if (self.prebatch is not None) and len(self.prebatch) > 0 and (global_step > self.prebatch_warmup): # if prebatch is setup and the training step is larger than the warmup step
-            ctx_repr_with_prebatch = torch.cat([ctx_repr, torch.cat(list(self.prebatch))], dim = 0)
+        if hasattr(self, 'prebatch') and len(self.prebatch) > 0 and (global_step > self.prebatch_warmup): # if prebatch is setup and the training step is larger than the warmup step
+            ctx_repr_with_queue = self.accum_repr(ctx_repr, self.prebatch)
         else :
-            ctx_repr_with_prebatch = ctx_repr
-            
-        scores = self.similarity_fn(query_repr, ctx_repr_with_prebatch) # (bsz, bsz)
+            ctx_repr_with_queue = ctx_repr
+
+        ## concat with passage queue
+        if hasattr(self, 'passage_queue') and len(self.passage_queue) > 0 :
+            ctx_repr_with_queue = self.accum_repr(ctx_repr_with_queue, self.passage_queue)
+        
+        ## concat with query queue
+        if hasattr(self, 'query_queue') and len(self.query_queue) > 0 :
+            query_repr_with_queue = self.accum_repr(query_repr, self.query_queue)
+        else :
+            query_repr_with_queue = query_repr
+
+        scores = self.similarity_fn(query_repr_with_queue, ctx_repr_with_queue) # (bsz, bsz)
         softmax_scores = F.log_softmax(scores, dim = 1)
         if pos_idx is None :
             pos_idx = torch.arange(len(query_repr)).to(scores.device)
@@ -182,11 +198,28 @@ class BiEncoderNllLoss(nn.Module) :
         in_batch_acc = corr_pred / len(query_repr)
 
         ## add prebatch
-        if self.prebatch is not None :
+        if hasattr(self, 'prebatch') :
             if self.update_prebatch :
-                self.prebatch = deque([ctx_repr_with_prebatch[:self.prebatch_size].clone().detach()], maxlen = self.prebatch_size)
+                self.prebatch = deque([ctx_repr_with_queue[:self.prebatch_size].clone().detach()], maxlen = self.prebatch_size)
             else:
                 self.prebatch.append(ctx_repr.clone().detach())
+        
+        ## add passage queue
+        if hasattr(self, 'passage_queue') :
+            self.passage_queue.append(ctx_repr.clone().detach())
+        
+        ## empty passage queue if gradient accumulation is over
+        if _done_accum :
+            self.passage_queue.clear()
+        
+        ## add query queue
+        if hasattr(self, 'query_queue') :
+            self.query_queue.append(query_repr.clone().detach())
+
+        ## empty query queue if gradient accumulation is over
+        if _done_accum :
+            self.query_queue.clear()
+
         loss = self.loss_fn(softmax_scores, pos_idx)
         return {'loss' : loss, 'acc' : in_batch_acc}
 
@@ -197,3 +230,6 @@ class BiEncoderNllLoss(nn.Module) :
         query_repr = query_repr / torch.norm(query_repr, dim = 1, keepdim = True)
         ctx_repr =  ctx_repr / torch.norm(ctx_repr, dim = 1, keepdim = True)
         return torch.matmul(query_repr, torch.transpose(ctx_repr, 0, 1))
+
+    def accum_repr(self, repr_queue, new_repr) :
+        return torch.cat([new_repr, torch.cat(list(repr_queue))], dim = 0)

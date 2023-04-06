@@ -42,7 +42,7 @@ class DPRTrainer() :
         ## accelerator setup
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         self.accelerator = Accelerator(
-            gradient_accumulation_steps=self.config.train['gradient_accumulation_steps'],
+            gradient_accumulation_steps=self.config.loss['gradient_accumulation_steps'],
             kwargs_handlers=[ddp_kwargs], 
             log_with='wandb', # logging with wandb
             split_batches=True, 
@@ -63,8 +63,8 @@ class DPRTrainer() :
         self.logger = logger
 
         ## loss setup, because the prebatch influence the loss function, we need to separate the loss function for train and eval mode
-        self.loss_fn_train = BiEncoderNllLoss(self.config['train'], train_mode = True)
-        self.loss_fn_eval = BiEncoderNllLoss(self.config['train'], train_mode = False)
+        self.loss_fn_train = BiEncoderNllLoss(self.config['loss'], train_mode = True, accumulation_step=self.config.loss['gradient_accumulation_steps'])
+        self.loss_fn_eval = BiEncoderNllLoss(self.config['loss'], train_mode = False)
 
         ## train setup
         self.biencoder = self.get_biencoder()
@@ -72,7 +72,7 @@ class DPRTrainer() :
         
         self.train_dataloader = self.get_train_dataloader()
         self.eval_dataloader = self.get_eval_dataloader()
-        self.loss_scale = self.config.train['prebatch_size'] + 1 if self.config.train['use_loss_scale'] else 1
+        self.loss_scale = self.config.loss['prebatch_size'] + 1 if self.config.train['use_loss_scale'] else 1
         self.max_iteration = self.config.train['num_training_steps'] if self.config.train['num_training_steps'] else len(self.train_dataloader)//self.config.data['train_batch_size'] * self.config.train['num_train_epochs']
 
         self.biencoder, self.optimizer, self.lr_scheduler, self.train_dataloader, self.eval_dataloader = self.accelerator.prepare(
@@ -156,8 +156,6 @@ class DPRTrainer() :
 
                         if self.accelerator.sync_gradients :
                             self.log_metrics(loss_and_acc, self.global_step, self.global_epoch)
-
-                        if self.accelerator.sync_gradients :
                             pbar.update(1)
                             self.global_step += 1
 
@@ -165,7 +163,7 @@ class DPRTrainer() :
                             if self.accelerator.is_main_process :
                                 self._save_checkpoint()
 
-                        if self.global_step % self.config.train['eval_step'] == 0 :
+                        if (self.global_step % self.config.train['eval_step'] == 0) and self.accelerator.sync_gradients :
                             self._eval()
 
                         if self.global_step >= self.max_iteration :
@@ -191,6 +189,7 @@ class DPRTrainer() :
     #         self.log_metrics(loss_and_acc, self.global_step, self.global_epoch)
 
     def _eval(self) :
+        end_of_train_dataloader = self.accelerator.gradient_state.end_of_dataloader
         eval_len = len(self.eval_dataloader)
         self.eval_loss = torch.tensor(0.0, device = self.device)
         self.eval_inbatch_acc = torch.tensor(0.0, device = self.device)
@@ -205,8 +204,8 @@ class DPRTrainer() :
         self.biencoder.train()
         ## gather metrics from all processes
         self.eval_loss, self.eval_inbatch_acc = self.accelerator.gather_for_metrics((self.eval_loss, self.eval_inbatch_acc))
-        self.eval_loss = torch.sum(self.eval_loss)/(eval_len*self.accelerator.num_processes) # self.eval_loss.shape[0] is the number of processes
-        self.eval_inbatch_acc = torch.sum(self.eval_inbatch_acc)/(eval_len*self.accelerator.num_processes) # self.eval_loss.shape[0] is the number of processes
+        self.eval_loss = torch.sum(self.eval_loss)/(eval_len*self.accelerator.num_processes) 
+        self.eval_inbatch_acc = torch.sum(self.eval_inbatch_acc)/(eval_len*self.accelerator.num_processes) 
 
         metrics = {
             'eval_loss' : self.eval_loss,
@@ -214,7 +213,8 @@ class DPRTrainer() :
         }
 
         self.log_metrics(metrics, self.global_step, self.global_epoch)
-    
+        self.accelerator.gradient_state._set_end_of_dataloader(end_of_train_dataloader)
+
     def compute_loss(self, inputs : Dict[str, Union[torch.Tensor, Any]], global_step : int = 0) -> Dict[str, torch.Tensor] :
         outputs = self.biencoder( # model returns query/ctx representation. see model.py@line87
             query_inputs = inputs['query'],
@@ -225,6 +225,7 @@ class DPRTrainer() :
                 query_repr      = outputs['query_repr'],
                 ctx_repr        = outputs['ctx_repr'],
                 global_step     = global_step,
+                _done_accum     = self.accelerator.sync_gradients,
             )
 
         else :
